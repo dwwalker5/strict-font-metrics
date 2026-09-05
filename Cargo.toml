@@ -1,0 +1,13 @@
+[package]
+name = "strict-font-metrics"
+version = "0.1.0"
+edition = "2021"
+authors = ["dwwalker5"]
+license = "MIT"
+description = "Strict-by-default parser for TrueType/OpenType font metrics, with a lenient escape hatch"
+repository = "https://github.com/dwwalker5/strict-font-metrics"
+readme = "README.md"
+keywords = ["fonts", "truetype", "opentype", "metrics", "sfnt"]
+categories = ["parser-implementations", "text-processing"]
+
+[dependencies]
