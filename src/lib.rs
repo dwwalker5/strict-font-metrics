@@ -12,6 +12,8 @@
 
 mod error;
 mod reader;
+#[cfg(test)]
+mod tests;
 
 pub use error::Error;
 
