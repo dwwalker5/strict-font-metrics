@@ -1,9 +1,9 @@
 # strict-font-metrics
 
 A Rust library that reads vertical metrics out of TrueType and OpenType
-files (units per em, ascender, descender, line gap, max advance width) by
-parsing the sfnt table directory and the `head`/`hhea` tables directly.
-No third-party dependencies; it's about 250 lines over three files.
+files (units per em, ascender/descender/line gap from both `hhea` and
+`OS/2`, max advance width) by parsing the sfnt table directory and the
+`head`/`hhea`/`OS/2` tables directly. No third-party dependencies.
 
 ## The problem
 
@@ -54,19 +54,21 @@ identically - the lenient path is always something a caller opts into.
 
 - the sfnt version tag is one this parser recognizes (`0x00010000` or `OTTO`)
 - every table directory offset/length stays within the file
-- the `head` and `hhea` table checksums match what the directory records
+- the `head`, `hhea`, and `OS/2` table checksums match what the directory records
 - `head`'s magic number is `0x5F0F3CF5`
 - `head` and `hhea` report version 1.0, the only version either table has ever had
+- `OS/2` reports a version this parser knows about (0 through 5)
 
-`ParseOptions::lenient()` turns all five off and reads the same byte
-layout anyway, on the theory that a font with a wrong checksum still has
-real numbers sitting in the right place in the file.
+`ParseOptions::lenient()` turns all of the above off and reads the same
+byte layout anyway, on the theory that a font with a wrong checksum still
+has real numbers sitting in the right place in the file.
 
 ## Status
 
-Early. Only `head` and `hhea` are parsed, which covers vertical line
-metrics but not per-glyph advance widths or OS/2's Windows-specific
-ascent/descent. See the repository's issues for what's planned next.
+Early. `head`, `hhea`, and `OS/2` are parsed, which covers vertical line
+metrics (both the `hhea` values and the Windows-specific ones from
+`OS/2`) but not per-glyph advance widths. See the repository's issues for
+what's planned next.
 
 ## License
 

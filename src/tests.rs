@@ -74,6 +74,38 @@ fn build_hhea(
     v
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_os2(
+    version: u16,
+    typo_ascender: i16,
+    typo_descender: i16,
+    typo_line_gap: i16,
+    win_ascent: u16,
+    win_descent: u16,
+) -> Vec<u8> {
+    let mut v = Vec::with_capacity(78);
+    v.extend_from_slice(&version.to_be_bytes());
+    v.extend_from_slice(&0i16.to_be_bytes()); // xAvgCharWidth
+    v.extend_from_slice(&0u16.to_be_bytes()); // usWeightClass
+    v.extend_from_slice(&0u16.to_be_bytes()); // usWidthClass
+    v.extend_from_slice(&0u16.to_be_bytes()); // fsType
+    v.extend_from_slice(&[0u8; 20]); // sub/superscript and strikeout metrics
+    v.extend_from_slice(&0i16.to_be_bytes()); // sFamilyClass
+    v.extend_from_slice(&[0u8; 10]); // panose
+    v.extend_from_slice(&[0u8; 16]); // ulUnicodeRange1..4
+    v.extend_from_slice(b"NONE"); // achVendID
+    v.extend_from_slice(&0u16.to_be_bytes()); // fsSelection
+    v.extend_from_slice(&0u16.to_be_bytes()); // usFirstCharIndex
+    v.extend_from_slice(&0u16.to_be_bytes()); // usLastCharIndex
+    v.extend_from_slice(&typo_ascender.to_be_bytes());
+    v.extend_from_slice(&typo_descender.to_be_bytes());
+    v.extend_from_slice(&typo_line_gap.to_be_bytes());
+    v.extend_from_slice(&win_ascent.to_be_bytes());
+    v.extend_from_slice(&win_descent.to_be_bytes());
+    assert_eq!(v.len(), 78);
+    v
+}
+
 fn build_font(sfnt_version: u32, tables: Vec<Table>) -> Vec<u8> {
     let header_len = 12 + 16 * tables.len();
     let mut body = Vec::new();
@@ -107,9 +139,14 @@ fn build_font(sfnt_version: u32, tables: Vec<Table>) -> Vec<u8> {
 fn valid_font() -> Vec<u8> {
     let head = build_head(2048, HEAD_MAGIC, 1, 0);
     let hhea = build_hhea(1, 0, 1900, -500, 90, 1500, 800);
+    let os2 = build_os2(4, 1950, -450, 100, 1900, 500);
     build_font(
         SFNT_TRUETYPE,
-        vec![Table::new(HEAD_TAG, head), Table::new(HHEA_TAG, hhea)],
+        vec![
+            Table::new(HEAD_TAG, head),
+            Table::new(HHEA_TAG, hhea),
+            Table::new(OS2_TAG, os2),
+        ],
     )
 }
 
@@ -124,24 +161,35 @@ fn parses_minimal_valid_font() {
     assert_eq!(metrics.advance_width_max, 1500);
     assert_eq!(metrics.number_of_h_metrics, 800);
     assert_eq!(metrics.line_height(), 1900 - (-500) + 90);
+    assert_eq!(metrics.typo_ascender, 1950);
+    assert_eq!(metrics.typo_descender, -450);
+    assert_eq!(metrics.typo_line_gap, 100);
+    assert_eq!(metrics.win_ascent, 1900);
+    assert_eq!(metrics.win_descent, 500);
 }
 
 #[test]
 fn accepts_opentype_cff_and_apple_true_tags() {
     let head = build_head(1000, HEAD_MAGIC, 1, 0);
     let hhea = build_hhea(1, 0, 800, -200, 0, 900, 4);
+    let os2 = build_os2(4, 850, -150, 0, 800, 150);
     let otto = build_font(
         SFNT_OPENTYPE_CFF,
         vec![
             Table::new(HEAD_TAG, head.clone()),
             Table::new(HHEA_TAG, hhea.clone()),
+            Table::new(OS2_TAG, os2.clone()),
         ],
     );
     assert!(parse(&otto, &ParseOptions::strict()).is_ok());
 
     let apple_true = build_font(
         SFNT_APPLE_TRUE,
-        vec![Table::new(HEAD_TAG, head), Table::new(HHEA_TAG, hhea)],
+        vec![
+            Table::new(HEAD_TAG, head),
+            Table::new(HHEA_TAG, hhea),
+            Table::new(OS2_TAG, os2),
+        ],
     );
     assert!(matches!(
         parse(&apple_true, &ParseOptions::strict()),
@@ -153,10 +201,28 @@ fn accepts_opentype_cff_and_apple_true_tags() {
 #[test]
 fn missing_hhea_table_is_an_error() {
     let head = build_head(2048, HEAD_MAGIC, 1, 0);
-    let data = build_font(SFNT_TRUETYPE, vec![Table::new(HEAD_TAG, head)]);
+    let os2 = build_os2(4, 1950, -450, 100, 1900, 500);
+    let data = build_font(
+        SFNT_TRUETYPE,
+        vec![Table::new(HEAD_TAG, head), Table::new(OS2_TAG, os2)],
+    );
     assert!(matches!(
         parse(&data, &ParseOptions::strict()),
         Err(Error::MissingTable("hhea"))
+    ));
+}
+
+#[test]
+fn missing_os2_table_is_an_error() {
+    let head = build_head(2048, HEAD_MAGIC, 1, 0);
+    let hhea = build_hhea(1, 0, 1900, -500, 90, 1500, 800);
+    let data = build_font(
+        SFNT_TRUETYPE,
+        vec![Table::new(HEAD_TAG, head), Table::new(HHEA_TAG, hhea)],
+    );
+    assert!(matches!(
+        parse(&data, &ParseOptions::strict()),
+        Err(Error::MissingTable("OS/2"))
     ));
 }
 
@@ -167,6 +233,7 @@ fn bad_sfnt_version_is_rejected() {
         vec![
             Table::new(HEAD_TAG, build_head(2048, HEAD_MAGIC, 1, 0)),
             Table::new(HHEA_TAG, build_hhea(1, 0, 1900, -500, 90, 1500, 800)),
+            Table::new(OS2_TAG, build_os2(4, 1950, -450, 100, 1900, 500)),
         ],
     );
     assert!(matches!(
@@ -188,6 +255,7 @@ fn checksum_mismatch_strict_vs_lenient() {
         vec![
             head_table,
             Table::new(HHEA_TAG, build_hhea(1, 0, 1900, -500, 90, 1500, 800)),
+            Table::new(OS2_TAG, build_os2(4, 1950, -450, 100, 1900, 500)),
         ],
     );
 
@@ -207,6 +275,7 @@ fn bad_magic_number_strict_vs_lenient() {
         vec![
             Table::new(HEAD_TAG, build_head(2048, 0xBAD_C0DE, 1, 0)),
             Table::new(HHEA_TAG, build_hhea(1, 0, 1900, -500, 90, 1500, 800)),
+            Table::new(OS2_TAG, build_os2(4, 1950, -450, 100, 1900, 500)),
         ],
     );
 
@@ -226,6 +295,7 @@ fn unsupported_table_version_strict_vs_lenient() {
         vec![
             Table::new(HEAD_TAG, build_head(2048, HEAD_MAGIC, 2, 0)),
             Table::new(HHEA_TAG, build_hhea(1, 0, 1900, -500, 90, 1500, 800)),
+            Table::new(OS2_TAG, build_os2(4, 1950, -450, 100, 1900, 500)),
         ],
     );
 
@@ -243,6 +313,30 @@ fn unsupported_table_version_strict_vs_lenient() {
 }
 
 #[test]
+fn unsupported_os2_version_strict_vs_lenient() {
+    let data = build_font(
+        SFNT_TRUETYPE,
+        vec![
+            Table::new(HEAD_TAG, build_head(2048, HEAD_MAGIC, 1, 0)),
+            Table::new(HHEA_TAG, build_hhea(1, 0, 1900, -500, 90, 1500, 800)),
+            Table::new(OS2_TAG, build_os2(6, 1950, -450, 100, 1900, 500)),
+        ],
+    );
+
+    assert!(matches!(
+        parse(&data, &ParseOptions::strict()),
+        Err(Error::UnsupportedTableVersion {
+            table: "OS/2",
+            major: 6,
+            minor: 0
+        })
+    ));
+
+    let metrics = parse(&data, &ParseOptions::lenient()).expect("lenient parse should recover");
+    assert_eq!(metrics.win_ascent, 1900);
+}
+
+#[test]
 fn table_out_of_bounds_is_an_error() {
     let mut head_table = Table::new(HEAD_TAG, build_head(2048, HEAD_MAGIC, 1, 0));
     head_table.offset_override = Some(10_000);
@@ -251,6 +345,7 @@ fn table_out_of_bounds_is_an_error() {
         vec![
             head_table,
             Table::new(HHEA_TAG, build_hhea(1, 0, 1900, -500, 90, 1500, 800)),
+            Table::new(OS2_TAG, build_os2(4, 1950, -450, 100, 1900, 500)),
         ],
     );
 

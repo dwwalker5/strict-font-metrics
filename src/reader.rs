@@ -43,4 +43,10 @@ impl<'a> Reader<'a> {
         let b = self.take(4)?;
         Ok([b[0], b[1], b[2], b[3]])
     }
+
+    /// Advance past `n` bytes without interpreting them.
+    pub(crate) fn skip(&mut self, n: usize) -> Result<(), Error> {
+        self.take(n)?;
+        Ok(())
+    }
 }

@@ -1,6 +1,6 @@
 //! Reads vertical metrics (units per em, ascender, descender, line gap) out
 //! of TrueType and OpenType files by walking the sfnt table directory and
-//! the `head`/`hhea` tables directly.
+//! the `head`/`hhea`/`OS/2` tables directly.
 //!
 //! By default every check the format allows for is enforced: table
 //! checksums must match the directory, `head`'s magic number must be
@@ -21,7 +21,9 @@ use reader::Reader;
 
 const HEAD_TAG: [u8; 4] = *b"head";
 const HHEA_TAG: [u8; 4] = *b"hhea";
+const OS2_TAG: [u8; 4] = *b"OS/2";
 const HEAD_MAGIC: u32 = 0x5F0F_3CF5;
+const OS2_MAX_KNOWN_VERSION: u16 = 5;
 const SFNT_TRUETYPE: u32 = 0x0001_0000;
 const SFNT_OPENTYPE_CFF: u32 = 0x4F54_544F; // 'OTTO'
 const SFNT_APPLE_TRUE: u32 = 0x7472_7565; // 'true', old Apple TrueType tag
@@ -70,6 +72,18 @@ pub struct FontMetrics {
     pub advance_width_max: u16,
     /// Number of entries in the `hmtx` table's advance-width array.
     pub number_of_h_metrics: u16,
+    /// Recommended ascender for Windows text clipping (`OS/2.sTypoAscender`).
+    pub typo_ascender: i16,
+    /// Recommended descender for Windows text clipping (`OS/2.sTypoDescender`,
+    /// typically negative).
+    pub typo_descender: i16,
+    /// Recommended line gap to pair with the typo metrics (`OS/2.sTypoLineGap`).
+    pub typo_line_gap: i16,
+    /// Windows-specific ascent used for glyph clipping (`OS/2.usWinAscent`).
+    pub win_ascent: u16,
+    /// Windows-specific descent used for glyph clipping (`OS/2.usWinDescent`,
+    /// stored unsigned even though it measures below the baseline).
+    pub win_descent: u16,
 }
 
 impl FontMetrics {
@@ -87,8 +101,8 @@ struct TableRecord {
     length: u32,
 }
 
-/// Parse the sfnt table directory and `head`/`hhea` tables of `data` and
-/// return the metrics they describe.
+/// Parse the sfnt table directory and `head`/`hhea`/`OS/2` tables of `data`
+/// and return the metrics they describe.
 ///
 /// ```no_run
 /// let data = std::fs::read("some-font.ttf").unwrap();
@@ -121,13 +135,16 @@ pub fn parse(data: &[u8], options: &ParseOptions) -> Result<FontMetrics, Error> 
 
     let head_record = find_table(&records, &HEAD_TAG).ok_or(Error::MissingTable("head"))?;
     let hhea_record = find_table(&records, &HHEA_TAG).ok_or(Error::MissingTable("hhea"))?;
+    let os2_record = find_table(&records, &OS2_TAG).ok_or(Error::MissingTable("OS/2"))?;
 
     let head_bytes = table_bytes(data, head_record)?;
     let hhea_bytes = table_bytes(data, hhea_record)?;
+    let os2_bytes = table_bytes(data, os2_record)?;
 
     if !options.lenient {
         verify_checksum(head_record, head_bytes)?;
         verify_checksum(hhea_record, hhea_bytes)?;
+        verify_checksum(os2_record, os2_bytes)?;
     }
 
     let mut head = Reader::new(head_bytes);
@@ -175,6 +192,33 @@ pub fn parse(data: &[u8], options: &ParseOptions) -> Result<FontMetrics, Error> 
     hhea.i16()?; // metricDataFormat
     let number_of_h_metrics = hhea.u16()?;
 
+    let mut os2 = Reader::new(os2_bytes);
+    let os2_version = os2.u16()?;
+    if !options.lenient && os2_version > OS2_MAX_KNOWN_VERSION {
+        return Err(Error::UnsupportedTableVersion {
+            table: "OS/2",
+            major: os2_version,
+            minor: 0,
+        });
+    }
+    os2.skip(2)?; // xAvgCharWidth
+    os2.skip(2)?; // usWeightClass
+    os2.skip(2)?; // usWidthClass
+    os2.skip(2)?; // fsType
+    os2.skip(20)?; // sub/superscript and strikeout metrics, 10 int16 fields
+    os2.skip(2)?; // sFamilyClass
+    os2.skip(10)?; // panose
+    os2.skip(16)?; // ulUnicodeRange1..4
+    os2.skip(4)?; // achVendID
+    os2.skip(2)?; // fsSelection
+    os2.skip(2)?; // usFirstCharIndex
+    os2.skip(2)?; // usLastCharIndex
+    let typo_ascender = os2.i16()?;
+    let typo_descender = os2.i16()?;
+    let typo_line_gap = os2.i16()?;
+    let win_ascent = os2.u16()?;
+    let win_descent = os2.u16()?;
+
     Ok(FontMetrics {
         units_per_em,
         ascender,
@@ -182,6 +226,11 @@ pub fn parse(data: &[u8], options: &ParseOptions) -> Result<FontMetrics, Error> 
         line_gap,
         advance_width_max,
         number_of_h_metrics,
+        typo_ascender,
+        typo_descender,
+        typo_line_gap,
+        win_ascent,
+        win_descent,
     })
 }
 
