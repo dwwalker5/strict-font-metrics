@@ -2,8 +2,9 @@
 
 A Rust library that reads vertical metrics out of TrueType and OpenType
 files (units per em, ascender/descender/line gap from both `hhea` and
-`OS/2`, max advance width) by parsing the sfnt table directory and the
-`head`/`hhea`/`OS/2` tables directly. No third-party dependencies.
+`OS/2`, max advance width) and per-glyph advance widths from `hmtx`, by
+parsing the sfnt table directory and the `head`/`hhea`/`OS/2`/`maxp`/`hmtx`
+tables directly. No third-party dependencies.
 
 ## The problem
 
@@ -50,6 +51,14 @@ match parse(&data, &ParseOptions::strict()) {
 so `parse(&data, &ParseOptions::default())` and the explicit form behave
 identically - the lenient path is always something a caller opts into.
 
+Per-glyph advance widths come from a separate call, since not every caller
+needs them and `hmtx` requires cross-referencing `maxp` for the glyph count:
+
+```rust
+let widths = strict_font_metrics::advance_widths(&data, &ParseOptions::strict())?;
+// widths[glyph_id] is that glyph's advance width, for every glyph in the font.
+```
+
 ## What strict mode checks
 
 - the sfnt version tag is one this parser recognizes (`0x00010000` or `OTTO`)
@@ -65,9 +74,11 @@ has real numbers sitting in the right place in the file.
 
 ## Status
 
-Early. `head`, `hhea`, and `OS/2` are parsed, which covers vertical line
-metrics (both the `hhea` values and the Windows-specific ones from
-`OS/2`) but not per-glyph advance widths. See the repository's issues for
+Early. `head`, `hhea`, and `OS/2` cover vertical line metrics (both the
+`hhea` values and the Windows-specific ones from `OS/2`), and `maxp`/`hmtx`
+cover per-glyph advance widths. Not yet handled: font collections (`ttc`)
+and a combined type that holds all of a font's parsed tables together
+rather than requiring separate calls. See the repository's issues for
 what's planned next.
 
 ## License

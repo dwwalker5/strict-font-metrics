@@ -1,6 +1,7 @@
-//! Reads vertical metrics (units per em, ascender, descender, line gap) out
-//! of TrueType and OpenType files by walking the sfnt table directory and
-//! the `head`/`hhea`/`OS/2` tables directly.
+//! Reads vertical metrics (units per em, ascender, descender, line gap) and
+//! per-glyph advance widths out of TrueType and OpenType files by walking
+//! the sfnt table directory and the `head`/`hhea`/`OS/2`/`maxp`/`hmtx`
+//! tables directly.
 //!
 //! By default every check the format allows for is enforced: table
 //! checksums must match the directory, `head`'s magic number must be
@@ -22,6 +23,8 @@ use reader::Reader;
 const HEAD_TAG: [u8; 4] = *b"head";
 const HHEA_TAG: [u8; 4] = *b"hhea";
 const OS2_TAG: [u8; 4] = *b"OS/2";
+const MAXP_TAG: [u8; 4] = *b"maxp";
+const HMTX_TAG: [u8; 4] = *b"hmtx";
 const HEAD_MAGIC: u32 = 0x5F0F_3CF5;
 const OS2_MAX_KNOWN_VERSION: u16 = 5;
 const SFNT_TRUETYPE: u32 = 0x0001_0000;
@@ -109,29 +112,7 @@ struct TableRecord {
 /// let metrics = strict_font_metrics::parse(&data, &strict_font_metrics::ParseOptions::strict());
 /// ```
 pub fn parse(data: &[u8], options: &ParseOptions) -> Result<FontMetrics, Error> {
-    let mut r = Reader::new(data);
-
-    let sfnt_version = r.u32()?;
-    let recognized = matches!(sfnt_version, SFNT_TRUETYPE | SFNT_OPENTYPE_CFF)
-        || (options.lenient && sfnt_version == SFNT_APPLE_TRUE);
-    if !recognized {
-        return Err(Error::BadSfntVersion(sfnt_version));
-    }
-
-    let num_tables = r.u16()?;
-    r.u16()?; // searchRange
-    r.u16()?; // entrySelector
-    r.u16()?; // rangeShift
-
-    let mut records = Vec::with_capacity(num_tables as usize);
-    for _ in 0..num_tables {
-        records.push(TableRecord {
-            tag: r.tag()?,
-            checksum: r.u32()?,
-            offset: r.u32()?,
-            length: r.u32()?,
-        });
-    }
+    let records = read_table_directory(data, options)?;
 
     let head_record = find_table(&records, &HEAD_TAG).ok_or(Error::MissingTable("head"))?;
     let hhea_record = find_table(&records, &HHEA_TAG).ok_or(Error::MissingTable("hhea"))?;
@@ -232,6 +213,96 @@ pub fn parse(data: &[u8], options: &ParseOptions) -> Result<FontMetrics, Error> 
         win_ascent,
         win_descent,
     })
+}
+
+/// Read the sfnt version and table directory shared by [`parse`] and
+/// [`advance_widths`].
+fn read_table_directory(data: &[u8], options: &ParseOptions) -> Result<Vec<TableRecord>, Error> {
+    let mut r = Reader::new(data);
+
+    let sfnt_version = r.u32()?;
+    let recognized = matches!(sfnt_version, SFNT_TRUETYPE | SFNT_OPENTYPE_CFF)
+        || (options.lenient && sfnt_version == SFNT_APPLE_TRUE);
+    if !recognized {
+        return Err(Error::BadSfntVersion(sfnt_version));
+    }
+
+    let num_tables = r.u16()?;
+    r.u16()?; // searchRange
+    r.u16()?; // entrySelector
+    r.u16()?; // rangeShift
+
+    let mut records = Vec::with_capacity(num_tables as usize);
+    for _ in 0..num_tables {
+        records.push(TableRecord {
+            tag: r.tag()?,
+            checksum: r.u32()?,
+            offset: r.u32()?,
+            length: r.u32()?,
+        });
+    }
+    Ok(records)
+}
+
+/// Parse the `hmtx` table and return each glyph's advance width, indexed by
+/// glyph ID.
+///
+/// `hmtx` only stores an explicit `(advanceWidth, lsb)` pair for the first
+/// `hhea.numberOfHMetrics` glyphs; every glyph after that reuses the last
+/// advance width in the table and stores only its left side bearing. This
+/// fills in those trailing entries so the returned `Vec` always has one
+/// width per glyph (per `maxp.numGlyphs`).
+///
+/// ```no_run
+/// let data = std::fs::read("some-font.ttf").unwrap();
+/// let widths = strict_font_metrics::advance_widths(&data, &strict_font_metrics::ParseOptions::strict());
+/// ```
+pub fn advance_widths(data: &[u8], options: &ParseOptions) -> Result<Vec<u16>, Error> {
+    let records = read_table_directory(data, options)?;
+
+    let hhea_record = find_table(&records, &HHEA_TAG).ok_or(Error::MissingTable("hhea"))?;
+    let maxp_record = find_table(&records, &MAXP_TAG).ok_or(Error::MissingTable("maxp"))?;
+    let hmtx_record = find_table(&records, &HMTX_TAG).ok_or(Error::MissingTable("hmtx"))?;
+
+    let hhea_bytes = table_bytes(data, hhea_record)?;
+    let maxp_bytes = table_bytes(data, maxp_record)?;
+    let hmtx_bytes = table_bytes(data, hmtx_record)?;
+
+    if !options.lenient {
+        verify_checksum(hhea_record, hhea_bytes)?;
+        verify_checksum(maxp_record, maxp_bytes)?;
+        verify_checksum(hmtx_record, hmtx_bytes)?;
+    }
+
+    let mut hhea = Reader::new(hhea_bytes);
+    hhea.skip(34)?; // everything before numberOfHMetrics
+    let number_of_h_metrics = hhea.u16()?;
+
+    let mut maxp = Reader::new(maxp_bytes);
+    maxp.u32()?; // version (0.5 and 1.0 both start with version, numGlyphs)
+    let num_glyphs = maxp.u16()?;
+
+    if !options.lenient && number_of_h_metrics > num_glyphs {
+        return Err(Error::InvalidHMetricsCount {
+            number_of_h_metrics,
+            num_glyphs,
+        });
+    }
+
+    let mut hmtx = Reader::new(hmtx_bytes);
+    let mut widths = Vec::with_capacity(num_glyphs as usize);
+    for _ in 0..number_of_h_metrics {
+        widths.push(hmtx.u16()?);
+        hmtx.skip(2)?; // lsb, not needed for advance widths
+    }
+
+    let last_width = widths.last().copied().unwrap_or(0);
+    for _ in number_of_h_metrics..num_glyphs {
+        hmtx.skip(2)?; // lsb-only entry; advance width repeats the last one
+        widths.push(last_width);
+    }
+
+    Ok(widths)
 }
 
 fn find_table<'a>(records: &'a [TableRecord], tag: &[u8; 4]) -> Option<&'a TableRecord> {

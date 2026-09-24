@@ -33,6 +33,12 @@ pub enum Error {
         major: u16,
         minor: u16,
     },
+    /// `hhea.numberOfHMetrics` is larger than `maxp.numGlyphs`, which the
+    /// `hmtx` layout has no valid interpretation for.
+    InvalidHMetricsCount {
+        number_of_h_metrics: u16,
+        num_glyphs: u16,
+    },
 }
 
 impl fmt::Display for Error {
@@ -71,6 +77,13 @@ impl fmt::Display for Error {
                 major,
                 minor,
             } => write!(f, "unsupported '{table}' table version {major}.{minor}"),
+            Error::InvalidHMetricsCount {
+                number_of_h_metrics,
+                num_glyphs,
+            } => write!(
+                f,
+                "hhea.numberOfHMetrics ({number_of_h_metrics}) exceeds maxp.numGlyphs ({num_glyphs})"
+            ),
         }
     }
 }

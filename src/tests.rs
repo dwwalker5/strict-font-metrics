@@ -106,6 +106,25 @@ fn build_os2(
     v
 }
 
+fn build_maxp(num_glyphs: u16) -> Vec<u8> {
+    let mut v = Vec::with_capacity(6);
+    v.extend_from_slice(&0x0000_5000u32.to_be_bytes()); // version 0.5
+    v.extend_from_slice(&num_glyphs.to_be_bytes());
+    v
+}
+
+fn build_hmtx(long_metrics: &[(u16, i16)], trailing_lsbs: &[i16]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(long_metrics.len() * 4 + trailing_lsbs.len() * 2);
+    for &(advance_width, lsb) in long_metrics {
+        v.extend_from_slice(&advance_width.to_be_bytes());
+        v.extend_from_slice(&lsb.to_be_bytes());
+    }
+    for &lsb in trailing_lsbs {
+        v.extend_from_slice(&lsb.to_be_bytes());
+    }
+    v
+}
+
 fn build_font(sfnt_version: u32, tables: Vec<Table>) -> Vec<u8> {
     let header_len = 12 + 16 * tables.len();
     let mut body = Vec::new();
@@ -365,4 +384,112 @@ fn truncated_input_yields_too_short() {
             Err(Error::TooShort { .. })
         ));
     }
+}
+
+fn font_with_hmtx(num_glyphs: u16, number_of_h_metrics: u16, hmtx: Vec<u8>) -> Vec<u8> {
+    let head = build_head(2048, HEAD_MAGIC, 1, 0);
+    let hhea = build_hhea(1, 0, 1900, -500, 90, 1500, number_of_h_metrics);
+    let os2 = build_os2(4, 1950, -450, 100, 1900, 500);
+    let maxp = build_maxp(num_glyphs);
+    build_font(
+        SFNT_TRUETYPE,
+        vec![
+            Table::new(HEAD_TAG, head),
+            Table::new(HHEA_TAG, hhea),
+            Table::new(OS2_TAG, os2),
+            Table::new(MAXP_TAG, maxp),
+            Table::new(HMTX_TAG, hmtx),
+        ],
+    )
+}
+
+#[test]
+fn parses_advance_widths_with_trailing_lsb_only_entries() {
+    let hmtx = build_hmtx(&[(600, 10), (650, 5), (700, 0)], &[3, -2]);
+    let data = font_with_hmtx(5, 3, hmtx);
+
+    let widths = advance_widths(&data, &ParseOptions::strict()).expect("should parse");
+    assert_eq!(widths, vec![600, 650, 700, 700, 700]);
+}
+
+#[test]
+fn advance_widths_with_no_trailing_entries() {
+    let hmtx = build_hmtx(&[(500, 0), (500, 0)], &[]);
+    let data = font_with_hmtx(2, 2, hmtx);
+
+    let widths = advance_widths(&data, &ParseOptions::strict()).expect("should parse");
+    assert_eq!(widths, vec![500, 500]);
+}
+
+#[test]
+fn advance_widths_missing_maxp_is_an_error() {
+    let head = build_head(2048, HEAD_MAGIC, 1, 0);
+    let hhea = build_hhea(1, 0, 1900, -500, 90, 1500, 1);
+    let hmtx = build_hmtx(&[(600, 0)], &[]);
+    let data = build_font(
+        SFNT_TRUETYPE,
+        vec![
+            Table::new(HEAD_TAG, head),
+            Table::new(HHEA_TAG, hhea),
+            Table::new(HMTX_TAG, hmtx),
+        ],
+    );
+
+    assert!(matches!(
+        advance_widths(&data, &ParseOptions::strict()),
+        Err(Error::MissingTable("maxp"))
+    ));
+}
+
+#[test]
+fn advance_widths_missing_hmtx_is_an_error() {
+    let head = build_head(2048, HEAD_MAGIC, 1, 0);
+    let hhea = build_hhea(1, 0, 1900, -500, 90, 1500, 1);
+    let maxp = build_maxp(1);
+    let data = build_font(
+        SFNT_TRUETYPE,
+        vec![
+            Table::new(HEAD_TAG, head),
+            Table::new(HHEA_TAG, hhea),
+            Table::new(MAXP_TAG, maxp),
+        ],
+    );
+
+    assert!(matches!(
+        advance_widths(&data, &ParseOptions::strict()),
+        Err(Error::MissingTable("hmtx"))
+    ));
+}
+
+#[test]
+fn number_of_h_metrics_greater_than_num_glyphs_strict_vs_lenient() {
+    let hmtx = build_hmtx(&[(600, 0), (650, 0), (700, 0)], &[]);
+    let data = font_with_hmtx(2, 3, hmtx);
+
+    assert!(matches!(
+        advance_widths(&data, &ParseOptions::strict()),
+        Err(Error::InvalidHMetricsCount {
+            number_of_h_metrics: 3,
+            num_glyphs: 2,
+        })
+    ));
+
+    // Lenient mode skips the sanity check and just reads numberOfHMetrics
+    // records straight out of hmtx, ignoring maxp's glyph count.
+    let widths = advance_widths(&data, &ParseOptions::lenient()).expect("should parse");
+    assert_eq!(widths, vec![600, 650, 700]);
+}
+
+#[test]
+fn advance_widths_truncated_hmtx_yields_too_short() {
+    // hhea claims 2 long metrics, but the hmtx table itself is only long
+    // enough for one - the kind of mismatch a lazy subsetting tool leaves
+    // behind.
+    let hmtx = build_hmtx(&[(600, 10)], &[]);
+    let data = font_with_hmtx(3, 2, hmtx);
+
+    assert!(matches!(
+        advance_widths(&data, &ParseOptions::strict()),
+        Err(Error::TooShort { .. })
+    ));
 }
